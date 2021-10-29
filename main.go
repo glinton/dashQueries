@@ -1,8 +1,3 @@
-// todo:
-// - write dashboard file as soon as it's got to avoid loss on app close/error
-// - skip if dashboard file exists (to continue working from where quit)
-// - parallelize requests for at least all cells on a board
-
 package main
 
 import (
@@ -12,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 type link struct {
@@ -33,9 +29,11 @@ var (
 	upstream string
 	cookie   string
 	limit    int
+	destDir  string
 )
 
 func init() {
+	flag.StringVar(&destDir, "d", filepath.Join(".", "dashboards"), "Location to store dashboards.")
 	flag.StringVar(&upstream, "u", "", "Upstream host to query.")
 	flag.StringVar(&cookie, "c", "", "Cookie for request.")
 	flag.IntVar(&limit, "l", -1, "Limit to number of dashboards.")
@@ -52,6 +50,11 @@ func init() {
 }
 
 func main() {
+	if err := os.MkdirAll(destDir, 0755); err != nil {
+		fmt.Printf("failed to create destination dir: %s\n", err.Error())
+		return
+	}
+
 	dashboards, err := getDashboards(upstream, cookie)
 	if err != nil {
 		fmt.Println(err.Error())
@@ -68,19 +71,11 @@ func main() {
 		gBoards = dashboards[:limit]
 	}
 
-	queries := getAllQueries(gBoards)
+	getAllQueries(gBoards)
 	if err != nil {
 		fmt.Println(err.Error())
 		return
 	}
-
-	err = writeQueries(queries)
-	if err != nil {
-		fmt.Println(err.Error())
-		fmt.Printf("\n%+v\n", queries)
-		return
-	}
-
 }
 
 func getDashboards(upstream, cookie string) ([]dash, error) {
@@ -107,34 +102,54 @@ func getDashboards(upstream, cookie string) ([]dash, error) {
 	return listed.Boards, nil
 }
 
-func getAllQueries(dashboards []dash) []dash {
+func getAllQueries(dashboards []dash) {
 	for i := range dashboards {
-		queries, err := getDashboardCellQueries(dashboards[i])
-		if err != nil {
-			fmt.Printf("failed to get dashboard cell queries for %q: %s\n", dashboards[i].ID, err.Error())
-			continue
-		}
+		getAllDashboardQueries(&dashboards[i])
+	}
+}
 
-		dashboards[i].QueryTexts = queries
-		dashboards[i].Cells = nil
+func getAllDashboardQueries(dashboard *dash) {
+	if fileExists(filepath.Join(destDir, dashboard.ID+".json")) {
+		return
 	}
 
-	return dashboards
+	queries, err := getDashboardCellQueries(*dashboard)
+	if err != nil {
+		fmt.Printf("failed to get dashboard cell queries for %q: %s\n", dashboard.ID, err.Error())
+		return
+	}
+
+	dashboard.QueryTexts = queries
+	dashboard.Cells = nil
+
+	writeQuery(*dashboard)
 }
 
 func getDashboardCellQueries(dashboard dash) ([]string, error) {
 	queries := []string{}
+	qtex := &sync.Mutex{}
+	wg := &sync.WaitGroup{}
 
 	for i := range dashboard.Cells {
-		cellQueries, err := getCellQueries(dashboard.Cells[i])
-		if err != nil {
-			fmt.Printf("failed to get cell queries for %q: %s\n", dashboard.Cells[i].Links.View, err.Error())
-			continue
-		}
+		wg.Add(1)
 
-		queries = append(queries, cellQueries...)
+		go func(cells dashCell) {
+			defer wg.Done()
+
+			cellQueries, err := getCellQueries(cells)
+			if err != nil {
+				fmt.Printf("failed to get cell queries for %q: %s\n", dashboard.Cells[i].Links.View, err.Error())
+				return
+			}
+
+			qtex.Lock()
+			queries = append(queries, cellQueries...)
+			qtex.Unlock()
+		}(dashboard.Cells[i])
 	}
 
+	// wait for cells to be populated
+	wg.Wait()
 	return queries, nil
 }
 
@@ -172,25 +187,21 @@ func getCellQueries(dCell dashCell) ([]string, error) {
 	return queries, nil
 }
 
-func writeQueries(dashboards []dash) error {
-	destDir := filepath.Join(".", "dashboards")
-	if err := os.MkdirAll(destDir, 0755); err != nil {
-		return fmt.Errorf("failed to create destination dir: %s", err.Error())
+func fileExists(filename string) bool {
+	_, err := os.Stat(filename)
+
+	return err == nil
+}
+
+func writeQuery(dashboard dash) {
+	f, err := os.Create(filepath.Join(destDir, dashboard.ID+".json"))
+	if err != nil {
+		fmt.Printf("failed to open file to write: %s\n", err.Error())
+		return
 	}
 
-	for i := range dashboards {
-		f, err := os.Create(filepath.Join(destDir, dashboards[i].ID+".json"))
-		if err != nil {
-			return fmt.Errorf("failed to open file to write: %s", err.Error())
-		}
-
-		err = json.NewEncoder(f).Encode(dashboards[i])
-		if err != nil {
-			fmt.Printf("failed to write dashboard %q to file: %s\n", dashboards[i].ID, err.Error())
-			continue
-		}
-		// strings.Join([]string{".", "dashboards", dashboards[i].ID}, string(os.PathSeparator))
+	err = json.NewEncoder(f).Encode(dashboard)
+	if err != nil {
+		fmt.Printf("failed to write dashboard %q to file: %s\n", dashboard.ID, err.Error())
 	}
-
-	return nil
 }
