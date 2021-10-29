@@ -156,12 +156,12 @@ func getDashboardCellQueries(dashboard dash) ([]string, error) {
 	for i := range dashboard.Cells {
 		wg.Add(1)
 
-		go func(cells dashCell) {
+		go func(dCell dashCell) {
 			defer wg.Done()
 
-			cellQueries, err := getCellQueries(cells)
+			cellQueries, err := getCellQueries(dCell)
 			if err != nil {
-				fmt.Printf("failed to get cell queries for %q: %s\n", dashboard.Cells[i].Links.View, err.Error())
+				fmt.Printf("failed to get cell queries for %q: %s\n", dCell.Links.View, err.Error())
 				return
 			}
 
@@ -171,7 +171,6 @@ func getDashboardCellQueries(dashboard dash) ([]string, error) {
 		}(dashboard.Cells[i])
 	}
 
-	// wait for cells to be populated
 	wg.Wait()
 	return queries, nil
 }
