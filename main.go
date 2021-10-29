@@ -26,17 +26,19 @@ type dash struct {
 }
 
 var (
-	upstream string
 	cookie   string
-	limit    int
 	destDir  string
+	upstream string
+	limit    int
+	workers  int
 )
 
 func init() {
+	flag.StringVar(&cookie, "c", "", "Cookie for request.")
 	flag.StringVar(&destDir, "d", filepath.Join(".", "dashboards"), "Location to store dashboards.")
 	flag.StringVar(&upstream, "u", "", "Upstream host to query.")
-	flag.StringVar(&cookie, "c", "", "Cookie for request.")
 	flag.IntVar(&limit, "l", -1, "Limit to number of dashboards.")
+	flag.IntVar(&workers, "w", 5, "Number of concurrent dashboards to fetch.")
 	flag.Parse()
 
 	if upstream == "" {
@@ -45,6 +47,10 @@ func init() {
 	}
 	if cookie == "" {
 		fmt.Println("cookie must be set")
+		os.Exit(1)
+	}
+	if workers > 50 {
+		fmt.Println("use 50 or fewer workers")
 		os.Exit(1)
 	}
 }
@@ -71,11 +77,28 @@ func main() {
 		gBoards = dashboards[:limit]
 	}
 
-	getAllQueries(gBoards)
-	if err != nil {
-		fmt.Println(err.Error())
-		return
+	bords := make(chan dash, len(gBoards))
+	wg := sync.WaitGroup{}
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			getAllQueries(bords)
+			if err != nil {
+				fmt.Println(err.Error())
+				return
+			}
+		}()
 	}
+
+	for i := range gBoards {
+		bords <- gBoards[i]
+	}
+
+	close(bords)
+
+	wg.Wait()
 }
 
 func getDashboards(upstream, cookie string) ([]dash, error) {
@@ -102,9 +125,9 @@ func getDashboards(upstream, cookie string) ([]dash, error) {
 	return listed.Boards, nil
 }
 
-func getAllQueries(dashboards []dash) {
-	for i := range dashboards {
-		getAllDashboardQueries(&dashboards[i])
+func getAllQueries(dashboards <-chan dash) {
+	for dboard := range dashboards {
+		getAllDashboardQueries(&dboard)
 	}
 }
 
